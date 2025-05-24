@@ -1,0 +1,152 @@
+To-Do List Detalhado & Plano de Ação
+Vamos estruturar o trabalho em fases claras.
+
+Fase 1: Preparação e Limpeza Inicial
+Esta fase ocorre antes da execução do script principal e foca na qualidade da conversão de .doc para .txt.
+
+Tarefa 1.1: Padronizar a Conversão para Texto Plano (UTF-8)
+Ação: Continue a usar o método "Salvar Como -> Texto Plano" com codificação "Unicode (UTF-8)", como mostra a sua imagem.
+Cuidado: Desmarque a opção "Inserir quebras de linha" se estiver disponível. Isso pode reduzir drasticamente o número de parágrafos fragmentados que o script precisará corrigir.
+Responsável: Você (processo manual).
+Fase 2: Aprimoramento do Script Text Aligner.py
+Aqui estão as modificações concretas para o código Python.
+
+Tarefa 2.1: Implementar Lógica de Mapeamento de Notas de Rodapé
+
+Objetivo: Identificar, mapear e reformatar todas as notas de rodapé.
+
+Ação 1: Melhorar a Identificação de Blocos de Notas de Rodapé.
+
+Modifique a Regex RE_FOOTNOTE_BLOCK para capturar o ID da nota.
+Código Sugerido (a substituir no script):
+Python
+
+# Substituir a antiga RE_FOOTNOTE_BLOCK
+RE_FOOTNOTE_BLOCK=re.compile(ur'^\s*(\d+(?:-\d+)?)\s+.*',re.UNICODE)
+Esta nova regex captura IDs como 9-1 ou 9.
+Ação 2: Adicionar um Novo "Pass" (Passe 1.5) para Mapeamento.
+
+Imediatamente após o "Pass 1: Initial Identification", adicione um novo ciclo para criar um dicionário que mapeia os IDs das notas de rodapé aos seus respetivos textos.
+Código Sugerido (a adicionar após o "Pass 1"):
+Python
+
+# --- Pass 1.5: Map Footnotes ---
+footnote_map = {}
+indices_to_remove = []
+for i, info in enumerate(processed_lines_data):
+    if info['type'] == LT_FOOTNOTE_BLOCK:
+        match = RE_FOOTNOTE_BLOCK.match(info['text'])
+        if match:
+            fn_id = match.group(1)
+            # Prepend (footnote) and store in map
+            footnote_map[fn_id] = u"(footnote) " + info['text']
+            indices_to_remove.append(i) # Mark for removal from main flow
+
+# Remove footnote lines from main processing to avoid them appearing in the wrong place
+for index in sorted(indices_to_remove, reverse=True):
+    del processed_lines_data[index]
+Ação 3: Identificar e Substituir Referências no Texto.
+
+Precisamos de uma regex para encontrar as referências no texto (ex: ⁹⁻¹). Isso é complexo devido aos caracteres superscript.
+Código Sugerido (a adicionar às Regex compiladas):
+Python
+
+# Regex para encontrar possíveis referências de notas de rodapé (simplificado)
+# Nota: Esta regex procura um número seguido de um possível hífen e outro número em superscript.
+# Pode precisar de ajustes dependendo dos caracteres exatos no seu ficheiro.
+RE_IN_TEXT_FOOTNOTE = re.compile(ur'([\d\u2070-\u2079\u00B9\u00B2\u00B3]+[\u207B\u208B]?[\d\u2070-\u2079\u00B9\u00B2\u00B3]*)')
+Ação: Adicionar um novo "Pass" (Passe 2.7) para fazer a substituição.
+Código Sugerido (a adicionar após o "Pass 2.5"):
+Python
+
+# --- Pass 2.7: Replace In-Text Footnote References ---
+temp_footnote_texts = []
+for info in processed_lines_data:
+    if info['merged_into_prev']: continue
+
+    # Função para normalizar superscripts para texto plano
+    def normalize_superscript(s):
+        return s.translate(s.maketrans(u"⁰¹²³⁴⁵⁶⁷⁸⁹⁻", u"0123456789-"))
+
+    match = RE_IN_TEXT_FOOTNOTE.search(info['text'])
+    if match:
+        superscript_text = match.group(1)
+        normalized_id = normalize_superscript(superscript_text)
+
+        if normalized_id in footnote_map:
+            # Substitui a referência pela tag (footnote)
+            info['text'] = info['text'].replace(superscript_text, u'(footnote ' + normalized_id + u')')
+            # Adiciona o texto da nota de rodapé à lista temporária
+            temp_footnote_texts.append(footnote_map[normalized_id])
+            del footnote_map[normalized_id] # Evita duplicados
+Ação 4: Adicionar as Notas de Rodapé no Final do Documento.
+
+No final do "Pass 3", antes da limpeza final, adicione os textos das notas de rodapé.
+Código Sugerido (a adicionar antes de "Final Cleanup"):
+Python
+
+# --- Add Footnotes at the End ---
+if temp_footnote_texts:
+    ensure_blank_lines_before(final_output, 2)
+    final_output.append(u"--- Notas de Rodapé ---")
+    ensure_blank_lines_before(final_output, 1)
+    for fn_text in temp_footnote_texts:
+        final_output.append(fn_text)
+Tarefa 2.2: Implementar Fusão de Parágrafos Genéricos (Heurística)
+
+Objetivo: Juntar linhas de um mesmo parágrafo que foram quebradas incorretamente.
+Ação: Adicionar um novo "Pass" (vamos chamá-lo de Passe 2.6) após a fusão de marcadores e descrições de cabeçalho.
+Lógica/Heurística: Uma linha deve ser fundida com a próxima se:
+A linha atual é do tipo LT_REGULAR.
+A linha atual NÃO termina com pontuação final (., :, ?, !).
+A linha seguinte (não em branco) também é LT_REGULAR ou LT_ENDS_COLON.
+A linha seguinte NÃO começa com uma palavra-chave de cabeçalho.
+Código Sugerido (a adicionar após o "Pass 2.5"):
+Python
+
+# --- Pass 2.6: Merge Regular Paragraph Lines ---
+i = 0
+line_count = len(processed_lines_data)
+while i < line_count - 1:
+    current_info = processed_lines_data[i]
+    if current_info['merged_into_prev']:
+        i += 1
+        continue
+
+    # Encontra a próxima linha de texto real
+    next_info = None
+    for j in range(i + 1, line_count):
+        if not processed_lines_data[j]['merged_into_prev']:
+            next_info = processed_lines_data[j]
+            break
+
+    if next_info:
+        # Condições para fundir
+        is_current_regular = current_info['type'] == LT_REGULAR
+        current_ends_punctuation = current_info['text'].strip().endswith((u'.', u':', u'?', u'!', u';'))
+        is_next_mergeable = next_info['type'] in [LT_REGULAR, LT_ENDS_COLON]
+        next_starts_keyword = next_info['text'].split(None, 1)[0].lower() in ALL_DETECT_KEYWORDS
+
+        if is_current_regular and not current_ends_punctuation and is_next_mergeable and not next_starts_keyword:
+            current_info['text'] += u" " + next_info['text']
+            next_info['merged_into_prev'] = True
+            # Permanece no mesmo 'i' para verificar se pode fundir com a próxima linha também
+            continue
+
+    i += 1
+Fase 3: Teste e Refinamento
+Tarefa 3.1: Executar o Script Modificado
+
+Ação: Aplique as alterações de código sugeridas ao seu ficheiro Text Aligner.py.
+Responsável: Você.
+Tarefa 3.2: Testar com Múltiplos Documentos
+
+Ação: Execute o script em vários dos seus documentos legais. Verifique especialmente:
+Se as notas de rodapé são corretamente identificadas e movidas.
+Se os parágrafos são fundidos corretamente, sem unir blocos de texto que deveriam estar separados.
+Se a formatação geral (espaçamento entre títulos, etc.) permanece correta.
+Responsável: Você.
+Tarefa 3.3: Iterar e Refinar
+
+Ação: A heurística de fusão de parágrafos e a regex de notas de rodapé podem precisar de ajustes. Se encontrar casos onde a fusão falha ou ocorre incorretamente, podemos refinar as regras.
+Este plano de ação fornece um caminho claro para evoluir o seu script, transformando-o numa ferramenta muito mais poderosa e adaptada às suas necessidades específicas de trabalho com textos legais.
